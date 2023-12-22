@@ -23,6 +23,7 @@ hdfs dfs -find /user/user50/ext_waybills_load -name "*_2022_*.csv" | xargs -I {}
 hdfs dfs -copyToLocal /user50/trainer/reports/report_QI864.csv /home/user50/reports
 
 
+******************************************************************************************
 
 Задание 2. Работа с таблицами в Hive.
 
@@ -40,3 +41,206 @@ hdfs dfs -copyToLocal /user50/trainer/reports/report_QI864.csv /home/user50/repo
     На основании DDL созданной таблицы создайте две другие таблицы, но в формате PARQUET, назовите их user50.elements (без сжатия) и user50.elements_old (со сжатием snappy).
     Переложите в них данные из исходной таблицы, причем в user50.elements положите все элементы, открытые после 1900 года, а в user50.elements_old - остальные.
     Вам предоставили файловую выгрузку в каталог /user/trainer/top100books. Создайте над ней внешнюю таблицу user50.external_top100books. Имена полей: book, author, year.
+
+
+-------------------------------------------------------------------------------------------
+
+-- Создание таблицы elements_source в формате TEXTFILE
+
+CREATE TABLE user50.elements_source (
+  Number INT,
+  Symbol STRING,
+  Name STRING,
+  Discoverer STRING,
+  Year INT
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '|'
+LINES TERMINATED BY '\n'
+STORED AS TEXTFILE;
+
+-- Загрузка данных из локального файла в таблицу
+INSERT INTO user50.elements_source VALUES
+  (1, 'H', 'Hydrogen', 'Henry Cavendish', 1766),
+  (2, 'He', 'Helium', 'Pierre Janssen', 1895),
+  (3, 'Li', 'Lithium', 'Johan August Arfwedson', 1817);
+
+-- посмотреть данные таблицы и путь в hdfs
+SHOW CREATE TABLE user50.elements_source;
+
+-- скопировать файл в hdfs
+hdfs dfs -copyFromLocal /home/trainer/elements/periodictable.dat /user/user50/
+
+-- Загрузка данных из локального файла в таблицу
+LOAD DATA INPATH '/user/user50/periodictable.dat' INTO TABLE user50.elements_source;
+
+-- Создание таблицы elements в формате PARQUET (без сжатия)
+CREATE TABLE user50.elements
+STORED AS PARQUET
+AS
+SELECT * FROM user50.elements_source WHERE Year > 1900;
+
+-- Создание таблицы elements_old в формате PARQUET (со сжатием snappy)
+CREATE TABLE user50.elements_old
+STORED AS PARQUET
+TBLPROPERTIES("parquet.compression"="SNAPPY")
+AS
+SELECT * FROM user50.elements_source WHERE Year <= 1900;
+
+-- Создание внешней таблицы external_top100books
+CREATE EXTERNAL TABLE user50.external_top100books (
+  book STRING,
+  author STRING,
+  year STRING
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY '	'
+LINES TERMINATED BY '\n'
+LOCATION '/user/trainer/top100books';
+
+*************************************************************************************
+
+Задание 3. Работа с HBase.
+
+    Поработаем с NoSQL.
+    Создайте с помощью HBase shell (не Phoenix!) таблицу user50.logins и наполните ее данными, предложенными далее. Column family назовите cf. Не забудьте, что все наименования регистрозависимые.
+    +-------------------+--------------+------------+
+    | Login (PK)        | IP           | Role       |
+    +-------------------+--------------+------------+
+    | Bender            | 10.128.12.21 | Combinator |
+    | Vorobyaninov      | 10.128.12.98 | Gigant     |
+    | Fyodor            |              | Otec       |
+    | Lyapis_Trubetskoy | 10.128.12.34 | Poet       |
+    +-------------------+--------------+------------+
+    Также создайте в Hive внешнюю таблицу user50.logins_from_hbase, с помощью которой можно прочитать вашу таблицу в HBase.
+
+---------------------------------------------------------------------------------------
+
+# Запуск HBase shell
+hbase shell
+
+# Создание таблицы user50.logins
+create 'user50.logins', 'cf'
+
+# Вставка данных в таблицу
+put 'user50.logins', 'Bender', 'cf:IP', '10.128.12.21'
+put 'user50.logins', 'Bender', 'cf:Role', 'Combinator'
+put 'user50.logins', 'Vorobyaninov', 'cf:IP', '10.128.12.98'
+put 'user50.logins', 'Vorobyaninov', 'cf:Role', 'Gigant'
+put 'user50.logins', 'Fyodor', 'cf:Role', 'Otec'
+put 'user50.logins', 'Lyapis_Trubetskoy', 'cf:IP', '10.128.12.34'
+put 'user50.logins', 'Lyapis_Trubetskoy', 'cf:Role', 'Poet'
+
+# Выход из HBase shell
+exit
+
+
+-- Создание внешней таблицы logins_from_hbase
+CREATE EXTERNAL TABLE user50.logins_from_hbase (
+  Login STRING,
+  IP STRING,
+  Role STRING
+)
+STORED BY 'org.apache.hadoop.hive.hbase.HBaseStorageHandler'
+WITH SERDEPROPERTIES (
+  "hbase.columns.mapping" = ":key,cf:IP,cf:Role"
+)
+TBLPROPERTIES (
+  "hbase.table.name" = "user50.logins"
+);
+
+Задание 4. Загрузка данных из внешнего источника.
+
+    Нам необходим захват данных из источника.
+    Воспользуйтесь Spark для загрузки данных из СУБД Postgres. Реквизиты подключения:
+Host:     de
+Port:     5432
+Database: b
+User:     b
+Password: b
+    Загрузите таблицу info.accounts из источника в таблицу user50.bank_accounts с сохранением DDL, формат - PARQUET без сжатия. Application загрузки назовите user50_spark_loader_bank_accounts.
+
+
+#!/usr/bin/python3
+
+import pyspark
+from pyspark.sql import SparkSession
+from pyspark.sql import Row
+
+spark = SparkSession.builder \
+	.appName("PySpark App") \
+	.enableHiveSupport() \
+	.config("spark.jars", "/home/trainer/postgresql-42.6.0.jar") \
+	.getOrCreate()
+
+df = spark.read \
+	.format("jdbc") \
+	.option("url", "jdbc:postgresql://de-edu-db.chronosavant.ru:5432/bank") \
+	.option("driver", "org.postgresql.Driver") \
+	.option("dbtable", "info.accounts") \
+	.option("user", "bank_etl") \
+	.option("password", "bank_etl_password") \
+	.load()
+df.write.mode("overwrite").format("parquet").saveAsTable("user50.bank_accounts")
+
+spark.stop()
+
+
+
+
+Задание 5. ETL процессы.
+
+    Полный цикл обработки данных.
+    Итак, вы готовы собрать полный цикл обработки данных - от их захвата до финальной обработки и выгрузки. Подготовим отчет.
+    Генеральная задача: загрузить из источников сведения о клиентах и их транзакции за день; на основании этих даннх построить отчет о суммарном обороте каждого клиента; клиентов с нулевым оборотом выгрузить в одну информационную систему, а клиентов с оборотом выше 20000000 - в другую.
+    Для автоматизации процесса создайте DAG с названием dag_user50_report_loading, выполняющийся ежедневно в 2 часа ночи. DAG должен быть снят с планирования.
+
+    Порядок действий в DAGе должен быть следующий (в скобках даны имена тасков):
+1. (start_task) Dummy task. Далее параллельно выполняются процессы:
+2a. (capture_files) Загрузка файлов из hdfs.
+2b. (capture_source) Загрузка таблицы из источника.
+После успешного выполнения всех шагов этапа 2 выполняются следующие шаги:
+3. (report_build) Построение отчета. Далее параллельно выполняются процессы:
+4a. (unloading_hdfs) Выгрузка в локальную файловую систему.
+4b. (unloading_hbase) Dummy task. Выгрузка в HBase не рассматривалась на курсе, но таск-заглушку нужно сделать.
+После успешного выполнения всех шагов этапа 4 выполняются следующие шаги:
+5. (end_task) Dummy task.
+
+    Комментарий. Мы не проходили этого на занятии, но для отсутствия проблем с доступом из airflow ко всем компонентам среды надо в параметрах DAGа default_args добавить еще один параметр "run_as_user": "<имя_вашего_юзера>".
+
+    Детализация задачи по каждому этапу.
+    Шаг 2a. (capture_files) Загрузка файлов из hdfs.
+    Загрузите данные о транзакциях из локальной файловой системы в hdfs. Заберите все файлы из каталога локальной файловой системы /mnt/trans и положите их в каталог hdfs /user/user50/trans_loading. Над каталогом trans_loading создайте внешнюю таблицу user50.trans_loading с полями trans_id, trans_dt, client_id, amt.
+
+    Шаг 2b. (capture_source) Загрузка таблицы из источника.
+    Загрузите данные о клиентах из СУБД Postgres. Реквизиты подключения:
+Host:     
+Port:     
+Database: 
+User:     
+Password: 
+    Загрузите таблицу info.clients из источника в таблицу user50.bank_clients с сохранением DDL, формат - PARQUET без сжатия. Драйвер для загрузки: /home/trainer/postgresql-42.6.0.jar
+
+    Шаг 3. (report_build) Построение отчета.
+    По всем клиентам сделайте отчет по обороту в таблицу user50.report_turnover. Структура таблицы с примером данных:
++-------+------------------+---------------------------+-----------------+
+| ID    | Phone            | Name                      | Turnover        |
+| (STR) | (STR)            | (STR)                     | (DECIMAL(18,2)) |
++-------+------------------+---------------------------+-----------------+
+| 7642  | +7 950 562-20-57 | Оксана Давидовна          | 1234.56         |
+| 9117  | +7 944 545-56-92 | Константин Константинович | 34.28           |
+| 8006  | +7 992 426-84-40 | Феликс Степанович         | 0.00            |
++-------+------------------+---------------------------+-----------------+
+    Формат таблицы - PARQUET без сжатия. Подсказка - чтобы избежать проблем с правами рекомендуем создавать таблицу из spark.
+    Напоминаем что оборот - сумма всех странзакций без учета знака (по модулю).
+
+    Шаг 4a. (unloading_hdfs) Выгрузка в локальную файловую систему.
+    Выгрузите всех клиентов с оборотом выше 20000000 в файл /home/user50/reports/report_turnover.csv в локальную файловую систему. Файл должен быть один, разделители полей - символ точка с запятой (;), разделители строк - символ переноса строки (/n). Порядок полей и форматирование данных должны быть такими же, как в таблице отчета на шаге 3.
+
+    Обратите внимание: запускайте проверку тогда, когда загружены все файлы и таблицы, проверка будет выполняться следующим образом:
+1. Очистка (truncate, не drop) всех описанных в задании объектов в Hive.
+2. Удаление описанных в задании файлов (не каталогов) в файловых системах.
+3. Запуск DAGа и ожидание окончания его работы.
+4. Проверка по существу.
+
+Желаем удачи!
